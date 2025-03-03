@@ -2,11 +2,10 @@ package main
 
 import (
     "fmt"
-    "io"
     "log"
+    "net/http"
     "os"
     "path/filepath"
-    "sort"
     "strings"
     "unicode/utf8"
 
@@ -14,13 +13,11 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// Конфигурация
 type Config struct {
     BotToken    string
     LecturesDir string
 }
 
-// Функция для загрузки конфигурации из переменных окружения
 func LoadConfig() (Config, error) {
     err := godotenv.Load()
     if err != nil {
@@ -29,14 +26,13 @@ func LoadConfig() (Config, error) {
 
     token := os.Getenv("TELEGRAM_BOT_TOKEN")
     if token == "" {
-        log.Println("TELEGRAM_BOT_TOKEN not found in environment, using default. The bot will likely fail to start.")
-        return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN not found")
+        return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN не найден в окружении")
     }
 
     lecturesDir := os.Getenv("LECTURES_DIR")
     if lecturesDir == "" {
         lecturesDir = "lectures"
-        log.Println("LECTURES_DIR not found in environment, using default: 'lectures'")
+        log.Println("LECTURES_DIR не найден в окружении, используем значение по умолчанию: 'lectures'")
     }
 
     return Config{
@@ -45,84 +41,129 @@ func LoadConfig() (Config, error) {
     }, nil
 }
 
-var userClass = make(map[int64]string)         
-var userCurrentLecture = make(map[int64]string) 
+var userClass = make(map[int64]string)
+
+type LectureInfo struct {
+    Class      string
+    LectureNum int
+}
+
+var userLecturesInfo = make(map[int64]LectureInfo)
+
 func main() {
     config, err := LoadConfig()
     if err != nil {
-        log.Fatalf("Error loading config: %s", err)
-    }
-
-    if len(config.BotToken) < 30 {
-        log.Fatalf("Invalid Telegram Bot Token: '%s'. Please check your environment variable.", config.BotToken)
+        log.Fatalf("Ошибка конфигурации: %v", err)
     }
 
     bot, err := tgbotapi.NewBotAPI(config.BotToken)
     if err != nil {
-        log.Fatalf("Error initializing bot: %s. Check your TELEGRAM_BOT_TOKEN.", err)
+        log.Fatalf("Ошибка инициализации бота: %v", err)
     }
 
-    bot.Debug = true
+    webhookURL := os.Getenv("WEBHOOK_URL")
+    if webhookURL == "" {
+        log.Fatal("WEBHOOK_URL не найден в переменных окружения")
+    }
 
-    log.Printf("Authorized on account %s", bot.Self.UserName)
+    webhookConfig, err := tgbotapi.NewWebhook(webhookURL)
+    if err != nil {
+        log.Fatalf("Ошибка при создании Webhook: %v", err)
+    }
 
-    u := tgbotapi.NewUpdate(0)
-    u.Timeout = 60
+    _, err = bot.Request(webhookConfig)
+    if err != nil {
+        log.Fatalf("Ошибка при отправке запроса Webhook: %v", err)
+    }
 
-    updates := bot.GetUpdatesChan(u)
+    info, err := bot.GetWebhookInfo()
+    if err != nil {
+        log.Fatalf("Ошибка при получении информации о Webhook: %v", err)
+    }
+    if info.LastErrorDate != 0 {
+        log.Printf("Телеграм сообщает об ошибке вебхука: %s", info.LastErrorMessage)
+    }
 
-    for update := range updates {
-        if update.Message == nil {
-            if update.CallbackQuery != nil {
-                // Handle callback query (button press)
-                callback := tgbotapi.NewCallback(update.CallbackQuery.ID, update.CallbackQuery.Data)
-                if _, err := bot.Request(callback); err != nil {
-                    panic(err)
-                }
-                handleCallback(bot, &update, config)
-            }
-            continue
+    http.HandleFunc("/webhook", func(w http.ResponseWriter, r *http.Request) {
+        update, err := bot.HandleUpdate(r)
+        if err != nil {
+            log.Printf("Ошибка обработки обновления: %v", err)
+            return
         }
-
-        log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
-
-        command := update.Message.Text
-        var responseText string
-
-        if command == "/start" {
-            responseText = "Привет! Я бот, который выдает конспекты по информатике. Выберите класс:"
-            keyboard := buildClassKeyboard()
-            msg := tgbotapi.NewMessage(update.Message.Chat.ID, responseText)
-            msg.ReplyMarkup = keyboard
-            _, err := bot.Send(msg)
-            if err != nil {
-                log.Println(err)
+        if update != nil {
+            if update.Message != nil {
+                handleMessage(bot, *update, config)
+            } else if update.CallbackQuery != nil {
+                handleCallback(bot, *update, config)
             }
-            continue
-        } else {
-            responseText = "Я не понимаю эту команду. Попробуйте /start."
         }
+    })
 
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "8443"
+    }
+
+    log.Printf("Сервер запущен на порту %s", port)
+    log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+func handleMessage(bot *tgbotapi.BotAPI, update tgbotapi.Update, config Config) {
+    command := update.Message.Text
+    var responseText string
+
+    switch command {
+    case "/start":
+        responseText = "Привет! Я бот, который выдает конспекты по информатике. Выберите класс:"
+        keyboard := buildClassKeyboard()
         msg := tgbotapi.NewMessage(update.Message.Chat.ID, responseText)
-        _, err = bot.Send(msg)
+        msg.ReplyMarkup = keyboard
+        _, err := bot.Send(msg)
+        if err != nil {
+            log.Println(err)
+        }
+    
+    case "7 Класс", "8 Класс", "9 Класс", "10 Класс":
+        userClass[update.Message.Chat.ID] = command
+        lecturesDir := filepath.Join(config.LecturesDir, command)
+
+        if _, err := os.Stat(lecturesDir); os.IsNotExist(err) {
+            msgText := fmt.Sprintf("Конспекты для %sа пока не доступны.", command)
+            msg := tgbotapi.NewMessage(update.Message.Chat.ID, msgText)
+            bot.Send(msg)
+            return
+        }
+
+        keyboard := buildLectureKeyboard(lecturesDir, config)
+        msgText := fmt.Sprintf("Выберите конспект для %sа:", command)
+        msg := tgbotapi.NewMessage(update.Message.Chat.ID, msgText)
+        msg.ReplyMarkup = keyboard
+        _, err := bot.Send(msg)
+        if err != nil {
+            log.Println(err)
+        }
+
+    default:
+        responseText = "Я не понимаю эту команду. Попробуйте /start."
+        msg := tgbotapi.NewMessage(update.Message.Chat.ID, responseText)
+        _, err := bot.Send(msg)
         if err != nil {
             log.Println(err)
         }
     }
 }
 
-func buildClassKeyboard() tgbotapi.InlineKeyboardMarkup {
-    keyboard := tgbotapi.NewInlineKeyboardMarkup(
-        tgbotapi.NewInlineKeyboardRow(
-            tgbotapi.NewInlineKeyboardButtonData("7 Класс", "class_7"),
-            tgbotapi.NewInlineKeyboardButtonData("8 Класс", "class_8"),
+func buildClassKeyboard() tgbotapi.ReplyKeyboardMarkup {
+    return tgbotapi.NewReplyKeyboard(
+        tgbotapi.NewKeyboardButtonRow(
+            tgbotapi.NewKeyboardButton("7 Класс"),
+            tgbotapi.NewKeyboardButton("8 Класс"),
         ),
-        tgbotapi.NewInlineKeyboardRow(
-            tgbotapi.NewInlineKeyboardButtonData("9 Класс", "class_9"),
-            tgbotapi.NewInlineKeyboardButtonData("10 Класс", "class_10"),
+        tgbotapi.NewKeyboardButtonRow(
+            tgbotapi.NewKeyboardButton("9 Класс"),
+            tgbotapi.NewKeyboardButton("10 Класс"),
         ),
     )
-    return keyboard
 }
 
 func buildLectureKeyboard(lecturesDir string, config Config) tgbotapi.InlineKeyboardMarkup {
@@ -131,341 +172,121 @@ func buildLectureKeyboard(lecturesDir string, config Config) tgbotapi.InlineKeyb
     files, err := os.ReadDir(lecturesDir)
     if err != nil {
         log.Printf("Ошибка при чтении директории с конспектами: %s", err)
-        return tgbotapi.InlineKeyboardMarkup{} // Возвращаем пустую клавиатуру
+        return tgbotapi.InlineKeyboardMarkup{InlineKeyboard: keyboard}
     }
 
-    row := []tgbotapi.InlineKeyboardButton{}
-    for _, file := range files {
+    for i, file := range files {
         if !file.IsDir() && strings.HasSuffix(file.Name(), ".txt") {
             buttonText := strings.TrimSuffix(file.Name(), ".txt")
-            const maxButtonLength = 64 
-
+            const maxButtonLength = 64
             if utf8.RuneCountInString(buttonText) > maxButtonLength {
                 buttonText = string([]rune(buttonText)[:maxButtonLength-3]) + "..."
             }
-
             relativePath, err := filepath.Rel(config.LecturesDir, filepath.Join(lecturesDir, file.Name()))
             if err != nil {
                 log.Printf("Ошибка при получении относительного пути: %s", err)
-                continue 
+                continue
             }
-
-            btn := tgbotapi.NewInlineKeyboardButtonData(buttonText, "lecture_"+relativePath)
-            row = append(row, btn)
-
-            if len(row) == 2 {
-                keyboard = append(keyboard, row)
-                row = []tgbotapi.InlineKeyboardButton{}
-            }
+            btn := tgbotapi.NewInlineKeyboardButtonData(buttonText, "lecture_"+relativePath+"_"+fmt.Sprint(i))
+            keyboard = append(keyboard, []tgbotapi.InlineKeyboardButton{btn})
         }
-    }
-
-    if len(row) > 0 {
-        keyboard = append(keyboard, row)
     }
 
     return tgbotapi.NewInlineKeyboardMarkup(keyboard...)
 }
 
-func handleCallback(bot *tgbotapi.BotAPI, update *tgbotapi.Update, config Config) {
+func handleLectureSelection(bot *tgbotapi.BotAPI, chatID int64, relativePath string, class string, lectureNum int, config Config) {
+    fullLecturePath := filepath.Join(config.LecturesDir, relativePath)
+
+    if _, err := os.Stat(fullLecturePath); os.IsNotExist(err) {
+        log.Printf("Файл лекции не найден: %s", fullLecturePath)
+        msg := tgbotapi.NewMessage(chatID, "Не удалось загрузить лекцию. Попробуйте позже.")
+        bot.Send(msg)
+        return
+    }
+
+    file := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(fullLecturePath))
+    _, err := bot.Send(file)
+    if err != nil {
+        log.Printf("Ошибка при отправке лекции: %s", err)
+        msg := tgbotapi.NewMessage(chatID, "Не удалось отправить лекцию. Попробуйте позже.")
+        bot.Send(msg)
+        return
+    }
+
+    userLecturesInfo[chatID] = LectureInfo{Class: class, LectureNum: lectureNum}
+    sendLectureNavigation(bot, chatID, class, lectureNum, getTotalLecturesForClass(class, config))
+}
+
+func getTotalLecturesForClass(class string, config Config) int {
+    lecturesDir := filepath.Join(config.LecturesDir, class)
+    files, err := os.ReadDir(lecturesDir)
+    if err != nil {
+        log.Printf("Ошибка при чтении директории с конспектами: %s", err)
+        return 0
+    }
+    count := 0
+    for _, file := range files {
+        if !file.IsDir() && strings.HasSuffix(file.Name(), ".txt") {
+            count++
+        }
+    }
+    return count
+}
+
+func sendLectureNavigation(bot *tgbotapi.BotAPI, chatID int64, class string, lectureNum int, totalLectures int) {
+    var buttons []tgbotapi.InlineKeyboardButton
+    if lectureNum > 0 {
+        buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("Назад", fmt.Sprintf("prev_%s_%d", class, lectureNum-1)))
+    }
+    if lectureNum < totalLectures-1 {
+        buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("Вперед", fmt.Sprintf("next_%s_%d", class, lectureNum+1)))
+    }
+
+    keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons)
+    msg := tgbotapi.NewMessage(chatID, "Выберите действие:")
+    msg.ReplyMarkup = keyboard
+    bot.Send(msg)
+}
+
+func handleCallback(bot *tgbotapi.BotAPI, update tgbotapi.Update, config Config) {
     callbackData := update.CallbackQuery.Data
     chatID := update.CallbackQuery.Message.Chat.ID
 
-    if strings.HasPrefix(callbackData, "class_") {
-        class := strings.TrimPrefix(callbackData, "class_")
-        userClass[chatID] = class 
+    log.Printf("Обрабатывается колбэк: %s", callbackData)
 
-        lecturesDir := filepath.Join(config.LecturesDir, class)
-
-        if _, err := os.Stat(lecturesDir); os.IsNotExist(err) {
-            msgText := fmt.Sprintf("Конспекты для %s класса пока не доступны.", class)
-            msg := tgbotapi.NewMessage(chatID, msgText)
-            bot.Send(msg)
-            return
+    if strings.HasPrefix(callbackData, "lecture_") {
+        parts := strings.Split(callbackData, "_")
+        relativePath := parts[1]
+        class := userClass[chatID]
+        lectureNum := 0
+        if len(parts) > 2 {
+            fmt.Sscanf(parts[2], "%d", &lectureNum)
         }
+        handleLectureSelection(bot, chatID, relativePath, class, lectureNum, config)
+    } else if strings.HasPrefix(callbackData, "prev_") || strings.HasPrefix(callbackData, "next_") {
+        parts := strings.Split(callbackData, "_")
+        class := parts[1]
+        lectureNum := 0
+        fmt.Sscanf(parts[2], "%d", &lectureNum)
 
-        keyboard := buildLectureKeyboard(lecturesDir, config)
-        msgText := fmt.Sprintf("Выберите конспект для %s класса:", class)
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        msg.ReplyMarkup = keyboard
-        _, err := bot.Send(msg)
-        if err != nil {
-            log.Println(err)
-        }
-    } else if strings.HasPrefix(callbackData, "lecture_") {
-        lecturePath := strings.TrimPrefix(callbackData, "lecture_")
-        fullLecturePath := filepath.Join(config.LecturesDir, lecturePath)
-        userCurrentLecture[chatID] = fullLecturePath 
-
-        content, err := readFileContent(fullLecturePath)
-        if err != nil {
-            log.Printf("Ошибка при чтении файла лекции: %s", err)
-            msgText := "Не удалось загрузить лекцию. Попробуйте позже."
-            msg := tgbotapi.NewMessage(chatID, msgText)
-            bot.Send(msg)
-            return
-        }
-
-        if len(content) == 0 {
-            msgText := "Мы еще не прошли эту тему."
-            msg := tgbotapi.NewMessage(chatID, msgText)
-            _, err = bot.Send(msg)
-            if err != nil {
-                log.Printf("Ошибка при отправке сообщения: %s", err)
-            }
-            askForNextAction(bot, chatID, false) // Здесь флаг, чтобы не показывать кнопку классов
-            return
-        }
-
-        // Отправляем содержание лекции по частям
-        sendMessageInParts(bot, chatID, content)
-
-        askForNextAction(bot, chatID, true) // Здесь класс будет показываться
-
-    } else if callbackData == "next_lecture" {
-        nextLecture(bot, config, chatID)
-    } else if callbackData == "prev_lecture" { // Обработка кнопки "Предыдущий конспект"
-        prevLecture(bot, config, chatID)
-    } else if callbackData == "show_classes" { // Обработка кнопки "Классы"
-        showDataClasses(bot, chatID)
-    } else if callbackData == "show_lecture_list" { // Обработка кнопки "Список конспектов"
-        showLectureList(bot, config, chatID)
+        relativePath := getLecturePathForClass(class, lectureNum, config)
+        handleLectureSelection(bot, chatID, relativePath, class, lectureNum, config)
     }
+
+    callbackMsg := tgbotapi.NewCallback(update.CallbackQuery.ID, "")
+    bot.Send(callbackMsg)
 }
 
-// Функция для показа кнопок с классами
-func showDataClasses(bot *tgbotapi.BotAPI, chatID int64) {
-    responseText := "Выберите класс:"
-    keyboard := buildClassKeyboard()
-    msg := tgbotapi.NewMessage(chatID, responseText)
-    msg.ReplyMarkup = keyboard
-    if _, err := bot.Send(msg); err != nil {
-        log.Println(err)
-    }
-}
-
-func buildNextLectureKeyboard(showClasses bool) tgbotapi.InlineKeyboardMarkup {
-    var buttons []tgbotapi.InlineKeyboardButton
-    buttons = append(buttons,
-        tgbotapi.NewInlineKeyboardButtonData("Предыдущий конспект", "prev_lecture"),
-        tgbotapi.NewInlineKeyboardButtonData("Следующий конспект", "next_lecture"),
-        tgbotapi.NewInlineKeyboardButtonData("Список конспектов", "show_lecture_list"), // Добавляем кнопку "Список конспектов"
-    )
-    if showClasses {
-        buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("Классы", "show_classes")) // Добавляем кнопку "Классы"
-    }
-
-    keyboard := tgbotapi.NewInlineKeyboardMarkup(
-        tgbotapi.NewInlineKeyboardRow(buttons...),
-    )
-
-    return keyboard
-}
-
-func readFileContent(filename string) (string, error) {
-    file, err := os.Open(filename)
-    if err != nil {
-        return "", err
-    }
-    defer file.Close()
-
-    content, err := io.ReadAll(file)
-    if err != nil {
-        return "", err
-    }
-
-    return string(content), nil
-}
-
-// Функция отправки длинного сообщения по частям
-func sendMessageInParts(bot *tgbotapi.BotAPI, chatID int64, content string) {
-    const maxMessageLength = 4096
-    for start := 0; start < len(content); start += maxMessageLength {
-        end := start + maxMessageLength
-        if end > len(content) {
-            end = len(content)
-        }
-        msgText := content[start:end]
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        _, err := bot.Send(msg)
-        if err != nil {
-            log.Printf("Ошибка при отправке сообщения: %s", err)
-        }
-    }
-}
-
-func askForNextAction(bot *tgbotapi.BotAPI, chatID int64, showClasses bool) {
-    // Учитываем, нужно ли показывать кнопку классов
-    nextLectureKeyboard := buildNextLectureKeyboard(showClasses)
-    nextMsgText := "Хотите следующий конспект или посмотреть список конспектов?"
-    nextMsg := tgbotapi.NewMessage(chatID, nextMsgText)
-    nextMsg.ReplyMarkup = nextLectureKeyboard
-    _, err := bot.Send(nextMsg)
-    if err != nil {
-        log.Printf("Ошибка при отправке сообщения: %s", err)
-    }
-}
-
-func nextLecture(bot *tgbotapi.BotAPI, config Config, chatID int64) {
-    class, ok := userClass[chatID]
-    if !ok {
-        msgText := "Пожалуйста, выберите класс сначала (/start)."
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        bot.Send(msg)
-        return
-    }
-
-    currentLecturePath, ok := userCurrentLecture[chatID]
-    if !ok {
-        msgText := "Пожалуйста, выберите конспект сначала."
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        bot.Send(msg)
-        return
-    }
-
+func getLecturePathForClass(class string, lectureNum int, config Config) string {
     lecturesDir := filepath.Join(config.LecturesDir, class)
-
     files, err := os.ReadDir(lecturesDir)
     if err != nil {
         log.Printf("Ошибка при чтении директории с конспектами: %s", err)
-        msgText := "Не удалось прочитать список конспектов."
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        bot.Send(msg)
-        return
+        return ""
     }
-
-    var lectureFiles []string
-    for _, file := range files {
-        if !file.IsDir() && strings.HasSuffix(file.Name(), ".txt") {
-            lectureFiles = append(lectureFiles, filepath.Join(lecturesDir, file.Name()))
-        }
+    if lectureNum < 0 || lectureNum >= len(files) {
+        return ""
     }
-    sort.Strings(lectureFiles)
-
-    currentIndex := -1
-    for i, filePath := range lectureFiles {
-        if filePath == currentLecturePath {
-            currentIndex = i
-            break
-        }
-    }
-
-    if currentIndex == -1 {
-        msgText := "Текущий конспект не найден в списке."
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        bot.Send(msg)
-        return
-    }
-
-    if currentIndex+1 < len(lectureFiles) {
-        nextLecturePath := lectureFiles[currentIndex+1]
-        content, err := readFileContent(nextLecturePath)
-        if err != nil {
-            log.Printf("Ошибка при чтении следующей лекции: %s", err)
-            msgText := "Не удалось прочитать следующую лекцию."
-            msg := tgbotapi.NewMessage(chatID, msgText)
-            bot.Send(msg)
-            return
-        }
-        userCurrentLecture[chatID] = nextLecturePath 
-
-        sendMessageInParts(bot, chatID, content)
-
-        askForNextAction(bot, chatID, true) // Здесь класс будет показываться
-
-    } else {
-        msgText := "Это последняя лекция в списке."
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        bot.Send(msg)
-        askForNextAction(bot, chatID, true) // Здесь также класс будет показываться
-    }
-}
-
-// Новый метод для обработки "Предыдущего конспекта"
-func prevLecture(bot *tgbotapi.BotAPI, config Config, chatID int64) {
-    class, ok := userClass[chatID]
-    if !ok {
-        msgText := "Пожалуйста, выберите класс сначала (/start)."
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        bot.Send(msg)
-        return
-    }
-
-    currentLecturePath, ok := userCurrentLecture[chatID]
-    if !ok {
-        msgText := "Пожалуйста, выберите конспект сначала."
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        bot.Send(msg)
-        return
-    }
-
-    lecturesDir := filepath.Join(config.LecturesDir, class)
-
-    files, err := os.ReadDir(lecturesDir)
-    if err != nil {
-        log.Printf("Ошибка при чтении директории с конспектами: %s", err)
-        msgText := "Не удалось прочитать список конспектов."
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        bot.Send(msg)
-        return
-    }
-
-    var lectureFiles []string
-    for _, file := range files {
-        if !file.IsDir() && strings.HasSuffix(file.Name(), ".txt") {
-            lectureFiles = append(lectureFiles, filepath.Join(lecturesDir, file.Name()))
-        }
-    }
-    sort.Strings(lectureFiles)
-
-    currentIndex := -1
-    for i, filePath := range lectureFiles {
-        if filePath == currentLecturePath {
-            currentIndex = i
-            break
-        }
-    }
-
-    if currentIndex == -1 || currentIndex == 0 {
-        msgText := "Это первая лекция в списке."
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        bot.Send(msg)
-        return
-    }
-
-    prevLecturePath := lectureFiles[currentIndex-1]
-    content, err := readFileContent(prevLecturePath)
-    if err != nil {
-        log.Printf("Ошибка при чтении предыдущей лекции: %s", err)
-        msgText := "Не удалось прочитать предыдущую лекцию."
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        bot.Send(msg)
-        return
-    }
-    userCurrentLecture[chatID] = prevLecturePath 
-
-    sendMessageInParts(bot, chatID, content)
-
-    askForNextAction(bot, chatID, true) // Здесь класс будет показываться
-}
-
-func showLectureList(bot *tgbotapi.BotAPI, config Config, chatID int64) {
-    class, ok := userClass[chatID]
-    if !ok {
-        msgText := "Пожалуйста, выберите класс сначала (/start)."
-        msg := tgbotapi.NewMessage(chatID, msgText)
-        bot.Send(msg)
-        return
-    }
-
-    lecturesDir := filepath.Join(config.LecturesDir, class)
-    keyboard := buildLectureKeyboard(lecturesDir, config)
-
-    msgText := fmt.Sprintf("Выберите конспект для %s класса:", class)
-    msg := tgbotapi.NewMessage(chatID, msgText)
-    msg.ReplyMarkup = keyboard
-    _, err := bot.Send(msg)
-    if err != nil {
-        log.Printf("Ошибка при отправке сообщения: %s", err)
-    }
+    return filepath.Join(class, files[lectureNum].Name())
 }

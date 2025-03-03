@@ -1,0 +1,188 @@
+Дата проведения урока: 19.03.2025
+Тема урока: Разработка программ, содержащих оператор ветвления
+
+1. Что такое оператор ветвления?
+Оператор ветвления — это конструкция в программировании, которая позволяет делать выбор между различными вариантами выполнения кода в зависимости от заданного условия. Наиболее распространенные операторы ветвления включают `if`, `else if`, `else` и `switch`.
+
+#### 2. Примеры операторов ветвления
+
+##### Пример 1: Оператор `if`
+Рассмотрим программу, которая определяет, является ли введенное число положительным, отрицательным или нулем.
+
+**Пример на Python:**
+```python
+# Ввод числа
+number = float(input("Введите число: "))
+
+# Оператор ветвления
+if number > 0:
+    print("Число положительное.")
+elif number < 0:
+    print("Число отрицательное.")
+else:
+    print("Число равно нулю.")
+```
+
+**Пример на Java:**
+```java
+import java.util.Scanner;
+
+public class NumberSign {
+    public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
+
+        // Ввод числа
+        System.out.print("Введите число: ");
+        double number = scanner.nextDouble();
+
+        // Оператор ветвления
+        if (number > 0) {
+            System.out.println("Число положительное.");
+        } else if (number < 0) {
+            System.out.println("Число отрицательное.");
+        } else {
+            System.out.println("Число равно нулю.");
+        }
+    }
+}
+```
+
+**Пример на C++:**
+```cpp
+#include <iostream>
+using namespace std;
+
+int main() {
+    double number;
+
+    // Ввод числа
+    cout << "Введите число: ";
+    cin >> number;
+
+    // Оператор ветвления
+    if (number > 0) {
+        cout << "Число положительное." << endl;
+    } else if (number < 0) {
+        cout << "Число отрицательное." << endl;
+    } else {
+        cout << "Число равно нулю." << endl;
+    }
+
+    return 0;
+}
+```
+
+##### Пример 2: Оператор `switch`
+Рассмотрим программу, которая выводит название дня недели по его номеру.
+
+**Пример на Python (замена `switch` на `if`):
+```python
+# Ввод номера дня
+day = int(input("Введите номер дня недели (1-7): "))
+
+# Оператор ветвления с использованием if
+if day == 1:
+    print("Понедельник")
+elif day == 2:
+    print("Вторник")
+elif day == 3:
+    print("Среда")
+elif day == 4:
+    print("Четверг")
+elif day == 5:
+    print("Пятница")
+elif day == 6:
+    print("Суббота")
+elif day == 7:
+    print("Воскресенье")
+else:
+    print("Неверный номер дня.")
+```
+
+**Пример на Java:**
+```java
+import java.util.Scanner;
+
+public class DayOfWeek {
+    public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
+
+        // Ввод номера дня
+        System.out.print("Введите номер дня недели (1-7): ");
+        int day = scanner.nextInt();
+
+        // Оператор ветвления switch
+        switch (day) {
+            case 1:
+                System.out.println("Понедельник");
+                break;
+            case 2:
+                System.out.println("Вторник");
+                break;
+            case 3:
+                System.out.println("Среда");
+                break;
+            case 4:
+                System.out.println("Четверг");
+                break;
+            case 5:
+                System.out.println("Пятница");
+                break;
+            case 6:
+                System.out.println("Суббота");
+                break;
+            case 7:
+                System.out.println("Воскресенье");
+                break;
+            default:
+                System.out.println("Неверный номер дня.");
+        }
+    }
+}
+```
+
+**Пример на C++:**
+```cpp
+#include <iostream>
+using namespace std;
+
+int main() {
+    int day;
+
+    // Ввод номера дня
+    cout << "Введите номер дня недели (1-7): ";
+    cin >> day;
+
+    // Оператор ветвления switch
+    switch (day) {
+        case 1:
+            cout << "Понедельник" << endl;
+            break;
+        case 2:
+            cout << "Вторник" << endl;
+            break;
+        case 3:
+            cout << "Среда" << endl;
+            break;
+        case 4:
+            cout << "Четверг" << endl;
+            break;
+        case 5:
+            cout << "Пятница" << endl;
+            break;
+        case 6:
+            cout << "Суббота" << endl;
+            break;
+        case 7:
+            cout << "Воскресенье" << endl;
+            break;
+        default:
+            cout << "Неверный номер дня." << endl;
+    }
+
+    return 0;
+}
+```
+
+#### 3. Заключение
+Операторы ветвления являются ключевыми элементами в программировании, позволяя осуществлять выбор в зависимости от условий программы. Работа с ними позволяет создавать более сложные и интерактивные программы. Практика написания таких алгоритмов поможет вам лучше понять логику программирования и алгоритмическое мышление.
